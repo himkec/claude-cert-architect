@@ -2,23 +2,63 @@
 Exercise 01: Tool Use — 3-Tool Chain
 Study Guide Reference: Domain 1 (Task 1.1, 1.2), Domain 2 (Task 2.1)
 
-Goal: Demonstrate the full agentic loop where Claude chains 3 tools:
-  get_current_datetime → add_duration_to_datetime → set_reminder
+Goal: Walk through each step of Claude tool use manually:
+  1. Write a tool function
+  2. Write a JSON schema
+  3. Call Claude with the JSON schema
+  4. Run the tool
+  5. Add the tool result and call Claude again
 
-Key concepts practiced:
-  - Defining tools with JSON schemas (input_schema)
-  - Running the agentic loop: check stop_reason == "tool_use"
-  - Executing tool functions and returning results as tool_result blocks
-  - Claude autonomously deciding the order and parameters of tool calls
+The chain: get_current_datetime → add_duration_to_datetime → set_reminder
 """
 
 import json
 from datetime import datetime, timedelta
 import anthropic
 
-# ─── 1. Tool Definitions ────────────────────────────────────────────────────
-# Each tool is a dict with: name, description, input_schema (JSON Schema)
-# Claude uses description + schema to decide when/how to call the tool.
+# =============================================================================
+# STEP 1: Write a tool function
+# =============================================================================
+# These are plain Python functions that do the actual work.
+# Claude never runs them directly — YOU run them on Claude's behalf.
+
+def get_current_datetime() -> dict:
+    """Return the current date and time."""
+    now = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
+    print(f"  [tool] get_current_datetime → {now}")
+    return {"datetime": now}
+
+
+def add_duration_to_datetime(datetime_str: str, hours: float, minutes: float) -> dict:
+    """Add hours and minutes to a datetime string and return the result."""
+    dt = datetime.fromisoformat(datetime_str)
+    result = dt + timedelta(hours=hours, minutes=minutes)
+    result_str = result.strftime("%Y-%m-%dT%H:%M:%S")
+    print(f"  [tool] add_duration_to_datetime({datetime_str} + {hours}h {minutes}m) → {result_str}")
+    return {"datetime": result_str}
+
+
+def set_reminder(remind_at: str, message: str) -> dict:
+    """Schedule a reminder at a given datetime with a message."""
+    reminder_id = f"REM-{datetime.now().strftime('%H%M%S')}"
+    print(f"  [tool] set_reminder @ {remind_at} | msg='{message}' → id={reminder_id}")
+    return {
+        "reminder_id": reminder_id,
+        "scheduled_at": remind_at,
+        "message": message,
+        "status": "scheduled",
+    }
+
+
+# =============================================================================
+# STEP 2: Write a JSON schema
+# =============================================================================
+# For each tool function, write a JSON schema that describes:
+#   - name:         must match what you'll call in your dispatcher
+#   - description:  how Claude decides WHEN to call this tool
+#   - input_schema: what arguments the tool accepts (JSON Schema format)
+#
+# Claude reads these schemas to decide which tool to call and what to pass.
 
 TOOLS = [
     {
@@ -29,7 +69,7 @@ TOOLS = [
         ),
         "input_schema": {
             "type": "object",
-            "properties": {},          # no inputs needed
+            "properties": {},   # no inputs — tool takes no arguments
             "required": [],
         },
     },
@@ -82,39 +122,38 @@ TOOLS = [
 ]
 
 
-# ─── 2. Tool Implementations (mock) ─────────────────────────────────────────
-# In production these would call real services. Here we simulate them.
+# =============================================================================
+# STEP 3: Call Claude with the JSON schema
+# =============================================================================
+# Pass the tool schemas to client.messages.create() via the `tools` parameter.
+# Claude will reply with stop_reason="tool_use" when it wants to call a tool,
+# or stop_reason="end_turn" when it has a final answer.
 
-def get_current_datetime() -> dict:
-    now = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
-    print(f"  [tool] get_current_datetime → {now}")
-    return {"datetime": now}
-
-
-def add_duration_to_datetime(datetime_str: str, hours: float, minutes: float) -> dict:
-    dt = datetime.fromisoformat(datetime_str)
-    result = dt + timedelta(hours=hours, minutes=minutes)
-    result_str = result.strftime("%Y-%m-%dT%H:%M:%S")
-    print(f"  [tool] add_duration_to_datetime({datetime_str} + {hours}h {minutes}m) → {result_str}")
-    return {"datetime": result_str}
-
-
-def set_reminder(remind_at: str, message: str) -> dict:
-    reminder_id = f"REM-{datetime.now().strftime('%H%M%S')}"
-    print(f"  [tool] set_reminder @ {remind_at} | msg='{message}' → id={reminder_id}")
-    return {
-        "reminder_id": reminder_id,
-        "scheduled_at": remind_at,
-        "message": message,
-        "status": "scheduled",
-    }
+def call_claude(client: anthropic.Anthropic, messages: list) -> object:
+    print(f"\n  Calling Claude (turn {len([m for m in messages if m['role'] == 'user'])})...")
+    response = client.messages.create(
+        model="claude-opus-4-6",
+        max_tokens=4096,
+        thinking={"type": "adaptive"},  # Claude decides how much to think
+        tools=TOOLS,                     # <── schemas registered here
+        messages=messages,
+    )
+    print(f"  stop_reason: {response.stop_reason}")
+    return response
 
 
-# ─── 3. Tool Dispatcher ──────────────────────────────────────────────────────
-# Maps tool names to their Python functions and executes them.
+# =============================================================================
+# STEP 4: Run the tool
+# =============================================================================
+# When Claude returns stop_reason="tool_use", inspect each content block.
+# Find blocks with type="tool_use", extract block.name and block.input,
+# then call the matching Python function.
 
-def execute_tool(tool_name: str, tool_input: dict) -> str:
-    """Execute a tool by name and return its result as a JSON string."""
+def run_tool(tool_name: str, tool_input: dict) -> str:
+    """Dispatch a tool call by name and return the result as a JSON string."""
+    print(f"\n  Claude requested tool: {tool_name}")
+    print(f"  Input: {json.dumps(tool_input, indent=4)}")
+
     if tool_name == "get_current_datetime":
         result = get_current_datetime()
     elif tool_name == "add_duration_to_datetime":
@@ -123,53 +162,45 @@ def execute_tool(tool_name: str, tool_input: dict) -> str:
         result = set_reminder(**tool_input)
     else:
         result = {"error": f"Unknown tool: {tool_name}"}
+
     return json.dumps(result)
 
 
-# ─── 4. Agentic Loop ─────────────────────────────────────────────────────────
-# Core pattern (Domain 1.1):
-#   request → if stop_reason=="tool_use": run tools, append results → repeat
-#   until stop_reason=="end_turn"
+# =============================================================================
+# STEP 5: Add the tool result and call Claude again
+# =============================================================================
+# After running the tool(s), package each result as a "tool_result" block and
+# append them in a new "user" message. Then call Claude again.
+# Repeat until stop_reason == "end_turn".
+#
+# Critical: append the full response.content (not just text) so that
+# tool_use blocks are preserved for the next API call.
 
 def run_agentic_loop(user_message: str) -> str:
     client = anthropic.Anthropic()
-
     messages = [{"role": "user", "content": user_message}]
 
-    print(f"\nUser: {user_message}\n")
-    print("─" * 60)
+    print(f"\nUser: {user_message}")
+    print("=" * 60)
 
-    turn = 0
     while True:
-        turn += 1
-        print(f"\n[Turn {turn}] Calling Claude...")
+        # ── Step 3: call Claude ───────────────────────────────────────────
+        response = call_claude(client, messages)
 
-        response = client.messages.create(
-            model="claude-opus-4-6",
-            max_tokens=4096,
-            thinking={"type": "adaptive"},   # let Claude decide thinking depth
-            tools=TOOLS,
-            messages=messages,
-        )
-
-        print(f"  stop_reason: {response.stop_reason}")
-
-        # ── Append Claude's response to the conversation ──────────────────
-        # We must append the full content list (not just text) so tool_use
-        # blocks are preserved for the next request.
+        # Append Claude's full response before doing anything else
         messages.append({"role": "assistant", "content": response.content})
 
-        # ── Check termination ─────────────────────────────────────────────
+        # ── Done? ─────────────────────────────────────────────────────────
         if response.stop_reason == "end_turn":
-            # Extract the final text reply
             final_text = next(
                 (block.text for block in response.content if hasattr(block, "text")),
                 "(no text response)",
             )
-            print(f"\n[Done] Claude's final reply:\n{final_text}")
+            print(f"\n{'=' * 60}")
+            print(f"Claude's final reply:\n{final_text}")
             return final_text
 
-        # ── Handle tool calls ─────────────────────────────────────────────
+        # ── Step 4: run each requested tool ──────────────────────────────
         if response.stop_reason == "tool_use":
             tool_results = []
 
@@ -177,35 +208,34 @@ def run_agentic_loop(user_message: str) -> str:
                 if block.type != "tool_use":
                     continue
 
-                print(f"\n  Claude wants to call: {block.name}")
-                print(f"  Input: {json.dumps(block.input, indent=4)}")
+                result_json = run_tool(block.name, block.input)
 
-                # Execute the tool
-                result_json = execute_tool(block.name, block.input)
-
-                # Build the tool_result block to send back
+                # ── Step 5: package tool result to send back ──────────────
+                # tool_use_id must match block.id so Claude knows which
+                # tool call this result belongs to.
                 tool_results.append({
                     "type": "tool_result",
-                    "tool_use_id": block.id,   # must match the tool_use block id
+                    "tool_use_id": block.id,
                     "content": result_json,
                 })
 
-            # Append all tool results in a single user turn
+            # Add all results as a single user turn, then loop → Step 3
             messages.append({"role": "user", "content": tool_results})
 
         else:
-            # Unexpected stop_reason — surface it and exit
             print(f"  Unexpected stop_reason: {response.stop_reason}")
             break
 
     return "(loop exited unexpectedly)"
 
 
-# ─── 5. Main ─────────────────────────────────────────────────────────────────
+# =============================================================================
+# Main
+# =============================================================================
 
 if __name__ == "__main__":
-    # The prompt intentionally leaves all decisions to Claude:
-    # which tools to call, in what order, and with what parameters.
+    # The prompt leaves all tool-selection decisions to Claude.
+    # It will autonomously chain all 3 tools to fulfill the request.
     prompt = (
         "Set a reminder for me in 2 hours and 30 minutes from now. "
         "The reminder should say: 'Time to review the Claude tool-use chapter!'"
