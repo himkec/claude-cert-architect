@@ -15,6 +15,9 @@ The chain: get_current_datetime → add_duration_to_datetime → set_reminder
 import json
 from datetime import datetime, timedelta
 import anthropic
+from dotenv import load_dotenv
+
+load_dotenv()  # loads ANTHROPIC_API_KEY from .env
 
 # =============================================================================
 # STEP 1: Write a tool function
